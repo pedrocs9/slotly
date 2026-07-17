@@ -1,82 +1,98 @@
-import { db } from "../../db"
-import { appointments, professionals, services, tenants } from "../../db/schema"
-import { eq } from "drizzle-orm"
 import { NextRequest, NextResponse } from "next/server"
+import { rateLimitResponse } from "../../lib/api-guard"
+import { createPublicAppointment } from "../../lib/booking"
+import { logEvent, publicError, requestIdFromHeaders } from "../../lib/observability"
+import { anonymizeIdentifier, checkRateLimit, clientIp, rateLimitConfig } from "../../lib/rate-limit"
+import { cleanString, isEmail, isUuid } from "../../lib/validation"
 
 export async function POST(req: NextRequest) {
+  const requestId = await requestIdFromHeaders()
+  const startedAt = Date.now()
+
   try {
+    const config = rateLimitConfig("booking")
+    const key = await anonymizeIdentifier(`${clientIp(req)}:appointments`)
+    const rateLimit = await checkRateLimit({
+      key,
+      limit: config.limit,
+      windowSeconds: config.windowSeconds,
+      route: "public_appointments",
+      requestId,
+    })
+    if (!rateLimit.ok) return rateLimitResponse(rateLimit, requestId) as unknown as NextResponse
+
+    const contentLength = Number(req.headers.get("content-length") ?? "0")
+    if (contentLength > 10_000) {
+      return NextResponse.json({ error: "Solicitud demasiado grande", requestId }, { status: 413, headers: { "x-request-id": requestId } })
+    }
+
     const body = await req.json()
-    const {
+    const slug = cleanString(body.slug, 100)
+    const serviceId = body.serviceId
+    const professionalId = body.professionalId
+    const fecha = cleanString(body.fecha, 10)
+    const hora = cleanString(body.hora, 5)
+    const nombre = cleanString(body.nombre, 100)
+    const telefono = cleanString(body.telefono, 30)
+    const email = cleanString(body.email, 100).toLowerCase()
+    const website = cleanString(body.website, 120)
+    const consent = body.consent === true
+
+    if (website) {
+      logEvent({ event: "booking_honeypot_rejected", severity: "warn", route: "/api/appointments", requestId })
+      return NextResponse.json({ error: "Solicitud invalida", requestId }, { status: 400, headers: { "x-request-id": requestId } })
+    }
+
+    if (!slug || !isUuid(serviceId) || !isUuid(professionalId) || !fecha || !hora || !nombre || !telefono) {
+      return NextResponse.json({ error: "Faltan campos obligatorios", requestId }, { status: 400, headers: { "x-request-id": requestId } })
+    }
+
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(fecha) || !/^\d{2}:\d{2}$/.test(hora)) {
+      return NextResponse.json({ error: "Fecha u hora invalida", requestId }, { status: 400, headers: { "x-request-id": requestId } })
+    }
+
+    if (!isEmail(email)) {
+      return NextResponse.json({ error: "Email invalido", requestId }, { status: 400, headers: { "x-request-id": requestId } })
+    }
+    if (!consent) {
+      return NextResponse.json({ error: "Debes aceptar el uso de tus datos para gestionar la reserva", requestId }, { status: 400, headers: { "x-request-id": requestId } })
+    }
+
+    const result = await createPublicAppointment({
       slug,
-      servicioNombre,
-      fecha,
-      hora,
-      nombre,
-      telefono,
-      email,
-      duracion,
-    } = body
-
-    // Validación básica
-    if (!slug || !servicioNombre || !fecha || !hora || !nombre || !telefono) {
-      return NextResponse.json(
-        { error: "Faltan campos obligatorios" },
-        { status: 400 }
-      )
-    }
-
-    // Buscar tenant
-    const tenant = await db.query.tenants.findFirst({
-      where: eq(tenants.slug, slug),
+      serviceId,
+      professionalId,
+      date: fecha,
+      time: hora,
+      clientName: nombre,
+      clientPhone: telefono,
+      clientEmail: email || null,
     })
 
-    if (!tenant) {
-      return NextResponse.json({ error: "Negocio no encontrado" }, { status: 404 })
+    if (!result.ok) {
+      logEvent({
+        event: result.status === 409 ? "booking_conflict" : "booking_rejected",
+        severity: result.status >= 500 ? "error" : "warn",
+        route: "/api/appointments",
+        requestId,
+        status: result.status,
+        metadata: { slug },
+      })
+      return NextResponse.json({ error: result.error, requestId }, { status: result.status, headers: { "x-request-id": requestId } })
     }
 
-    // Buscar profesional principal del tenant
-    const profesional = await db.query.professionals.findFirst({
-      where: eq(professionals.tenant_id, tenant.id),
+    logEvent({
+      event: "booking_created",
+      severity: "info",
+      route: "/api/appointments",
+      requestId,
+      status: 200,
+      durationMs: Date.now() - startedAt,
+      metadata: { slug, appointmentStatus: result.status },
     })
-
-    if (!profesional) {
-      return NextResponse.json({ error: "Profesional no encontrado" }, { status: 404 })
-    }
-
-    // Buscar servicio por nombre
-    const servicio = await db.query.services.findFirst({
-      where: eq(services.tenant_id, tenant.id),
-    })
-
-    if (!servicio) {
-      return NextResponse.json({ error: "Servicio no encontrado" }, { status: 404 })
-    }
-
-    // Construir fecha y hora de inicio y fin
-    const startsAt = new Date(`${fecha}T${hora}:00`)
-    const endsAt = new Date(startsAt.getTime() + duracion * 60 * 1000)
-
-    // Insertar cita
-    const [cita] = await db.insert(appointments).values({
-      tenant_id: tenant.id,
-      professional_id: profesional.id,
-      service_id: servicio.id,
-      client_name: nombre,
-      client_phone: telefono,
-      client_email: email || null,
-      starts_at: startsAt,
-      ends_at: endsAt,
-      status: "confirmed",
-      booked_by: "client",
-    }).returning()
-
-    return NextResponse.json({ success: true, citaId: cita.id })
-
+    return NextResponse.json({ success: true, citaId: result.appointment.id, status: result.status, requestId }, { headers: { "x-request-id": requestId } })
   } catch (error) {
-    console.error("Error al crear cita:", error)
-    return NextResponse.json(
-      { error: "Error interno del servidor" },
-      { status: 500 }
-    )
+    logEvent({ event: "booking_unexpected_error", severity: "error", route: "/api/appointments", requestId, status: 500, code: error instanceof Error ? error.name : "unknown" })
+    return publicError("No pudimos completar la reserva.", 500, requestId) as unknown as NextResponse
   }
 }

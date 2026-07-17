@@ -1,0 +1,44 @@
+name: Slotly CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  app:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run test
+      - run: npm run build
+
+  e2e:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: ${{ secrets.SLOTLY_E2E_DATABASE_URL }}
+      AUTH_SECRET: ${{ secrets.SLOTLY_E2E_AUTH_SECRET }}
+      AUTH_TRUST_HOST: "true"
+      SLOTLY_DB_ENV: test
+      SLOTLY_RATE_LIMIT_REQUIRED: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install chromium
+      - run: npm run db:check
+      - run: npm run test:e2e:fixtures
+      - run: npm run test:e2e
+      - if: always()
+        run: npm run test:cleanup
