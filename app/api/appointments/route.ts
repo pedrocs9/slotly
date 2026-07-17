@@ -4,6 +4,12 @@ import { createPublicAppointment } from "../../lib/booking"
 import { logEvent, publicError, requestIdFromHeaders } from "../../lib/observability"
 import { anonymizeIdentifier, checkRateLimit, clientIp, rateLimitConfig } from "../../lib/rate-limit"
 import { cleanString, isEmail, isUuid } from "../../lib/validation"
+import { sendBookingConfirmationToClient, sendBookingNotificationToTenant } from "../../lib/email"
+import { eq } from "drizzle-orm"
+import { db } from "../../db"
+import { professionals, services, tenants } from "../../db/schema"
+
+
 
 export async function POST(req: NextRequest) {
   const requestId = await requestIdFromHeaders()
@@ -90,7 +96,41 @@ export async function POST(req: NextRequest) {
       durationMs: Date.now() - startedAt,
       metadata: { slug, appointmentStatus: result.status },
     })
-    return NextResponse.json({ success: true, citaId: result.appointment.id, status: result.status, requestId }, { headers: { "x-request-id": requestId } })
+
+    Promise.all([
+      db.query.tenants.findFirst({ where: eq(tenants.slug, slug) }),
+      db.query.services.findFirst({ where: eq(services.id, serviceId) }),
+      db.query.professionals.findFirst({ where: eq(professionals.id, professionalId) }),
+    ]).then(([tenant, service, professional]) => {
+      if (!tenant || !service || !professional) return
+
+      const emailInput = {
+        tenantName: tenant.name,
+        tenantEmail: tenant.email,
+        tenantSlug: tenant.slug,
+        tenantPhone: tenant.phone,
+        clientName: nombre,
+        clientEmail: email || null,
+        serviceName: service.name,
+        professionalName: professional.name,
+        date: fecha,
+        time: hora,
+        timezone: tenant.timezone,
+        status: result.status,
+        cancellationPolicy: tenant.cancellation_policy,
+        postBookingInstructions: tenant.post_booking_instructions,
+      }
+
+      return Promise.all([
+        sendBookingConfirmationToClient(emailInput),
+        sendBookingNotificationToTenant(emailInput),
+      ])
+    }).catch((err) => console.error("[slotly.email]", err))
+
+    return NextResponse.json(
+      { success: true, citaId: result.appointment.id, status: result.status, requestId },
+      { headers: { "x-request-id": requestId } }
+    )
   } catch (error) {
     logEvent({ event: "booking_unexpected_error", severity: "error", route: "/api/appointments", requestId, status: 500, code: error instanceof Error ? error.name : "unknown" })
     return publicError("No pudimos completar la reserva.", 500, requestId) as unknown as NextResponse
