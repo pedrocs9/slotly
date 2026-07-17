@@ -8,6 +8,7 @@ import { sendBookingConfirmationToClient, sendBookingNotificationToTenant } from
 import { eq } from "drizzle-orm"
 import { db } from "../../db"
 import { professionals, services, tenants } from "../../db/schema"
+import { after } from "next/server"
 
 
 
@@ -97,35 +98,41 @@ export async function POST(req: NextRequest) {
       metadata: { slug, appointmentStatus: result.status },
     })
 
-    Promise.all([
-      db.query.tenants.findFirst({ where: eq(tenants.slug, slug) }),
-      db.query.services.findFirst({ where: eq(services.id, serviceId) }),
-      db.query.professionals.findFirst({ where: eq(professionals.id, professionalId) }),
-    ]).then(([tenant, service, professional]) => {
-      if (!tenant || !service || !professional) return
+    after(async () => {
+      try {
+        const [tenant, service, professional] = await Promise.all([
+          db.query.tenants.findFirst({ where: eq(tenants.slug, slug) }),
+          db.query.services.findFirst({ where: eq(services.id, serviceId) }),
+          db.query.professionals.findFirst({ where: eq(professionals.id, professionalId) }),
+        ])
 
-      const emailInput = {
-        tenantName: tenant.name,
-        tenantEmail: tenant.email,
-        tenantSlug: tenant.slug,
-        tenantPhone: tenant.phone,
-        clientName: nombre,
-        clientEmail: email || null,
-        serviceName: service.name,
-        professionalName: professional.name,
-        date: fecha,
-        time: hora,
-        timezone: tenant.timezone,
-        status: result.status,
-        cancellationPolicy: tenant.cancellation_policy,
-        postBookingInstructions: tenant.post_booking_instructions,
+        if (!tenant || !service || !professional) return
+
+        const emailInput = {
+          tenantName: tenant.name,
+          tenantEmail: tenant.email,
+          tenantSlug: tenant.slug,
+          tenantPhone: tenant.phone,
+          clientName: nombre,
+          clientEmail: email || null,
+          serviceName: service.name,
+          professionalName: professional.name,
+          date: fecha,
+          time: hora,
+          timezone: tenant.timezone,
+          status: result.status,
+          cancellationPolicy: tenant.cancellation_policy,
+          postBookingInstructions: tenant.post_booking_instructions,
+        }
+
+        await Promise.all([
+          sendBookingConfirmationToClient(emailInput),
+          sendBookingNotificationToTenant(emailInput),
+        ])
+      } catch (err) {
+        console.error("[slotly.email]", err)
       }
-
-      return Promise.all([
-        sendBookingConfirmationToClient(emailInput),
-        sendBookingNotificationToTenant(emailInput),
-      ])
-    }).catch((err) => console.error("[slotly.email]", err))
+    })
 
     return NextResponse.json(
       { success: true, citaId: result.appointment.id, status: result.status, requestId },
