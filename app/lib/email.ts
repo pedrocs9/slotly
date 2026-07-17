@@ -1,8 +1,13 @@
+
 import { Resend } from "resend"
 
-const resend = new Resend(process.env.RESEND_API_KEY)
-const FROM = process.env.SLOTLY_FROM_EMAIL ?? "hola@pgstudio.tech"
+function getResend() {
+  return new Resend(process.env.RESEND_API_KEY)
+}
 
+function getFrom() {
+  return process.env.SLOTLY_FROM_EMAIL ?? "hola@pgstudio.tech"
+}
 export type BookingEmailInput = {
   tenantName: string
   tenantEmail: string | null
@@ -39,8 +44,8 @@ export async function sendBookingConfirmationToClient(input: BookingEmailInput) 
   const dateFormatted = formatDate(input.date, input.time, input.timezone)
   const isConfirmed = input.status === "confirmed"
 
-  await resend.emails.send({
-    from: `${input.tenantName} via Slotly <${FROM}>`,
+  await getResend().emails.send({
+     from: `${input.tenantName} via Slotly <${getFrom()}>`,
     to: input.clientEmail,
     subject: isConfirmed
       ? `Reserva confirmada · ${input.serviceName} en ${input.tenantName}`
@@ -82,8 +87,8 @@ export async function sendBookingNotificationToTenant(input: BookingEmailInput) 
   const dateFormatted = formatDate(input.date, input.time, input.timezone)
   const isConfirmed = input.status === "confirmed"
 
-  await resend.emails.send({
-    from: `Slotly <${FROM}>`,
+  await getResend().emails.send({
+    from: `Slotly <${getFrom()}>`,
     to: input.tenantEmail,
     subject: `Nueva reserva · ${input.clientName} · ${input.serviceName}`,
     html: `
