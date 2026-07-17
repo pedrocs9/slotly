@@ -123,6 +123,8 @@ export async function POST(req: NextRequest) {
           status: result.status,
           cancellationPolicy: tenant.cancellation_policy,
           postBookingInstructions: tenant.post_booking_instructions,
+          appointmentId: result.appointment.id,
+          
         }
 
         await Promise.all([

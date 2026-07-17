@@ -1,5 +1,6 @@
 
 import { Resend } from "resend"
+import { createEmailActionToken } from "./email-tokens"
 
 function getResend() {
   return new Resend(process.env.RESEND_API_KEY)
@@ -81,11 +82,18 @@ export async function sendBookingConfirmationToClient(input: BookingEmailInput) 
   })
 }
 
-export async function sendBookingNotificationToTenant(input: BookingEmailInput) {
+export async function sendBookingNotificationToTenant(input: BookingEmailInput & { appointmentId?: string }) {
   if (!input.tenantEmail) return
 
   const dateFormatted = formatDate(input.date, input.time, input.timezone)
   const isConfirmed = input.status === "confirmed"
+  const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? "https://slotly.pgstudio.tech"
+
+  let confirmUrl = ""
+  if (!isConfirmed && input.appointmentId) {
+    const token = await createEmailActionToken(input.appointmentId, "confirm")
+    confirmUrl = `${appUrl}/api/appointments/confirm?token=${token}`
+  }
 
   await getResend().emails.send({
     from: `Slotly <${getFrom()}>`,
@@ -108,7 +116,14 @@ export async function sendBookingNotificationToTenant(input: BookingEmailInput) 
             <tr><td style="padding:8px 0;color:#64748b;font-size:14px">Estado</td><td style="padding:8px 0;font-size:14px"><span style="background:${isConfirmed ? "rgba(5,150,105,.1)" : "rgba(245,158,11,.1)"};color:${isConfirmed ? "#047857" : "#b45309"};border-radius:999px;padding:3px 10px;font-size:12px;font-weight:700">${isConfirmed ? "Auto-confirmada" : "Pendiente"}</span></td></tr>
           </table>
         </div>
-        <a href="https://slotly.pgstudio.tech/dashboard" style="display:inline-block;background:#0f172a;color:#fff;font-size:14px;font-weight:700;padding:12px 22px;border-radius:10px;text-decoration:none;margin-bottom:24px">Ver en dashboard →</a>
+        ${confirmUrl ? `
+        <a href="${confirmUrl}" style="display:inline-block;background:#047857;color:#fff;font-size:14px;font-weight:700;padding:14px 28px;border-radius:10px;text-decoration:none;margin-bottom:12px">
+          ✓ Confirmar cita
+        </a>
+        <br />` : ""}
+        <a href="${appUrl}/dashboard" style="display:inline-block;background:#0f172a;color:#fff;font-size:14px;font-weight:700;padding:12px 22px;border-radius:10px;text-decoration:none;margin-bottom:24px">
+          Ver en dashboard →
+        </a>
         <hr style="border:none;border-top:1px solid #e2e8f0;margin:24px 0" />
         <p style="font-size:12px;color:#94a3b8;margin:0">Slotly · pgstudio.tech</p>
       </div>
