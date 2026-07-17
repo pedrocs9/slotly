@@ -2,6 +2,8 @@ import { and, eq, gt, gte, inArray, lt, lte } from "drizzle-orm"
 import { db, sql } from "../db"
 import { appointments, availability, availabilityExceptions, professionalServices, professionals, services, tenants } from "../db/schema"
 import { findReusableCustomer, normalizeEmail, normalizePhone } from "./customers"
+import { sendBookingConfirmationToClient, sendBookingNotificationToTenant } from "./email"
+import { logEvent } from "./observability"
 import { databaseTimestampToUtcDate, minutesToTime, rangesOverlap, timeToMinutes, utcDateToDatabaseTimestamp, zonedDateTimeToUtc, zonedWeekday } from "./time"
 
 const ACTIVE_APPOINTMENT_STATUSES = ["pending", "confirmed"] as const
@@ -299,6 +301,38 @@ export async function createPublicAppointment(input: {
     `
 
     const appointment = rows[0] as { id: string, status: "pending" | "confirmed" }
+    const emailInput = {
+      tenantName: tenant.name,
+      tenantEmail: tenant.email,
+      tenantSlug: tenant.slug,
+      tenantPhone: tenant.phone,
+      clientName: input.clientName,
+      clientEmail,
+      serviceName: service.name,
+      professionalName: professional.name,
+      date: input.date,
+      time: input.time,
+      timezone: tenant.timezone,
+      status: appointment.status,
+      cancellationPolicy: tenant.cancellation_policy,
+      postBookingInstructions: tenant.post_booking_instructions,
+    }
+
+    try {
+      await Promise.all([
+        sendBookingConfirmationToClient(emailInput),
+        sendBookingNotificationToTenant({ ...emailInput, appointmentId: appointment.id }),
+      ])
+    } catch (emailError) {
+      logEvent({
+        event: "booking_email_failed",
+        severity: "error",
+        route: "/api/appointments",
+        tenantId: tenant.id,
+        code: emailError instanceof Error ? emailError.message : "unknown",
+      })
+    }
+
     return { ok: true as const, appointment, status: appointment.status }
   } catch (error) {
     const pgError = error as { code?: string, constraint?: string }
